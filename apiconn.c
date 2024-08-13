@@ -28,7 +28,7 @@ float maxp[4] = {0,0,0,0};
 float minp[4] = {MAXFLOAT,MAXFLOAT,MAXFLOAT,MAXFLOAT};
 long long int sum_v[4] = {0,0,0,0};
 bool flag_init[4] = {false,false,false,false};
-long long int start_price[4] = {0,0,0,0};
+float start_price[4] = {0,0,0,0};
 const char* symbols[] = {"AAPL","AMZN","MSFT","BTC"};
 void save_string(json_t* data);
 void *producer();
@@ -166,7 +166,7 @@ int main() {
   pthread_join(con2,NULL);
   pthread_join(con3,NULL);
   pthread_join(cntr,NULL);
-	queueDelete(fifo);
+	//queueDelete(fifo);
   return 0;
 }
 
@@ -179,7 +179,9 @@ static void sigint_handler(int sig){
   printf("INSIDE SIGINT");
   char filename[64];
   for(int i = 0; i < REQUEST_SIZE; i++){
-      fclose(file[i]);
+    if(file[i]!=NULL)
+      if(fclose(file[i]) != 0)
+        printf("Couldn't close file");
   }
   exit(0);
 }

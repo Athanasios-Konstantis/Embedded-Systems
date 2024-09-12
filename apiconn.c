@@ -27,7 +27,7 @@ static struct lws *client_wsi = NULL;
 float maxp[4] = {0,0,0,0};
 float minp[4] = {MAXFLOAT,MAXFLOAT,MAXFLOAT,MAXFLOAT};
 long long int sum_v[4] = {0,0,0,0};
-bool flag_init[4] = {false,false,false,false};
+bool flag_init[4ls] = {false,false,false,false};
 float start_price[4] = {0,0,0,0};
 const char* symbols[] = {"AAPL","AMZN","MSFT","BTC"};
 void save_string(json_t* data);

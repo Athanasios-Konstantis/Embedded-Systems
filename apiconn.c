@@ -21,13 +21,15 @@ char time_str[40];
 FILE *file[REQUEST_SIZE];
 static int interrupted = 0;
 static int interrupted_intentionally = 0;
+static int times_pinged = 0;
 static struct lws *client_wsi = NULL;
 
 //max and min price this second
+float price[4] = {0,0,0,0};
 float maxp[4] = {0,0,0,0};
+long long volume_sum[4] = {0,0,0,0};
 float minp[4] = {MAXFLOAT,MAXFLOAT,MAXFLOAT,MAXFLOAT};
-long long int sum_v[4] = {0,0,0,0};
-bool flag_init[4ls] = {false,false,false,false};
+bool flag_init[4] = {false,false,false,false};
 float start_price[4] = {0,0,0,0};
 const char* symbols[] = {"AAPL","AMZN","MSFT","BTC"};
 void save_string(json_t* data);
@@ -46,10 +48,20 @@ typedef struct{
 	pthread_cond_t *notFull, *notEmpty;
 } queue;
 
+typedef struct{
+  float buff[REQUEST_SIZE][15];
+  long tail[REQUEST_SIZE];
+} queue2;
+
 queue *fifo;
+queue2 *volumes;
+queue2 *mean_prices;
 queue *queueInit(void);
+queue2 *queue2Init(void);
 void queueDelete(queue *q);
+void queue2Delete(queue2 *q);
 void queueAdd(queue *q, json_t* p);
+void queue2Add(queue2 *q, int index, long long in);
 void queueDel(queue *q, json_t** out);
 static void sigint_handler(int sig);
 
@@ -75,7 +87,7 @@ static int ws_callback(struct lws *wsi, enum lws_callback_reasons reason,
             }
             break;
         case LWS_CALLBACK_CLIENT_RECEIVE:
-            printf("Received message: %s\n", (char *)in);
+            printf("Received message: %s\n \t\t\t\t\t\t\t\t @ time %ld\n", (char *)in,time(NULL));
             //printf("LENGTH OF MESSAGE %d\n",(int)len);
             if(len > 0){
               json_error_t error;
@@ -85,10 +97,23 @@ static int ws_callback(struct lws *wsi, enum lws_callback_reasons reason,
               }
               json_t *data_array = json_object_get(whole_msg, "data");
               if (!json_is_array(data_array)) {
-                  fprintf(stderr, "\"data\" is not an array or does not exist.\n");
-                  json_decref(whole_msg);
-                  return 0;  //IM NOT SURE WHAT THE RETURN SHOULD BE
-              }
+
+                  json_t *type = json_object_get(whole_msg,"type");
+                  if(!json_is_string(type)){
+                    printf("type is not an array \n");
+                    fprintf(stderr, "\"data\" is not an array or does not exist.\n");
+                    json_decref(whole_msg);
+                    return 0;
+                  } 
+                  if(strcmp("ping",json_string_value(type)) == 0){
+                    if(++times_pinged == 3){
+                      interrupted = 1;
+                    }
+                  printf("TIMES PINGED = %d\n",times_pinged);
+                  return 0;
+                  }
+              }    
+              times_pinged = 0;
               for(int i = 0; i < (int)json_array_size(data_array); i++) {
                   // Access the fields in each object
                   json_t *data = json_array_get(data_array,i);
@@ -151,10 +176,14 @@ int main() {
   signal(SIGINT, sigint_handler);
 
 	fifo = queueInit();
-	if(fifo == NULL){
+  volumes = queue2Init();
+  mean_prices = queue2Init();
+
+	if(fifo == NULL || volumes == NULL){
 		fprintf(stderr, "main: Queue Init failed.\n");
 		exit(1);
 	}
+  
 
   pthread_create(&pro, NULL, producer, NULL);
 	pthread_create(&con1, NULL, consumer, NULL);
@@ -166,13 +195,14 @@ int main() {
   pthread_join(con2,NULL);
   pthread_join(con3,NULL);
   pthread_join(cntr,NULL);
-	//queueDelete(fifo);
   return 0;
 }
 
 static void sigint_handler(int sig){
   interrupted_intentionally = 1;
   lws_context_destroy(context);
+  queue2Delete(volumes);
+  queue2Delete(mean_prices);
   queueDelete(fifo);
   pthread_mutex_destroy(&cntr_mut);
 
@@ -212,7 +242,7 @@ void *producer()
       pthread_cond_signal (fifo->notEmpty);
     }
 
-    if (interrupted) {
+    if (interrupted){
         lws_context_destroy(context);
         context = create_context();
         if (!context) break;
@@ -229,7 +259,7 @@ void *consumer()
   while(1){
     pthread_mutex_lock (fifo->mut);
     while (fifo->empty) {
-      printf("consumer: queue EMPTY.\n");
+      //printf("consumer: queue EMPTY.\n");
       pthread_cond_wait (fifo->notEmpty, fifo->mut);
     }
     queueDel(fifo, &msg);
@@ -268,6 +298,20 @@ queue *queueInit (void)
   return (q);
 }
 
+queue2 *queue2Init(void){
+  queue2 *q;
+
+  q = (queue2 *)malloc( sizeof(queue2));
+  if(q == NULL) return (NULL);
+  for(int index = 0; index < 15; index++){
+    for(int j = 0; j < REQUEST_SIZE; j++){
+      q->buff[j][index] = 0;  
+      q->tail[j] = 0;
+    }
+    
+  }
+}
+
 void queueDelete (queue *q)
 {
   pthread_mutex_destroy (q->mut);
@@ -277,6 +321,10 @@ void queueDelete (queue *q)
   pthread_cond_destroy (q->notEmpty);
   free (q->notEmpty);
   free (q);
+}
+
+void queue2Delete(queue2 *q){
+  free(q);
 }
 
 void queueAdd (queue *q, json_t* p)
@@ -292,6 +340,13 @@ void queueAdd (queue *q, json_t* p)
   return;
 }
 
+void queue2Add(queue2 *q,int index, long long in){
+  q->buff[index][q->tail[index]] = in;
+  q->tail[index]++;
+  if(q->tail[index] == 15)
+    q->tail[index] = 0;
+}
+
 void queueDel (queue *q, json_t** out)
 {
   *out = q->buf[q->head];
@@ -305,10 +360,18 @@ void queueDel (queue *q, json_t** out)
 
   return;
 }
+long long queue2Get(queue2 *q, int index){
+  long long sum = 0;
+  for(int i = 0; i < 15; i++){
+    sum += q->buff[index][i];
+  }
+  return sum;
+}
 
 
 
 void save_string(json_t* data){
+    static int price_index[4] = {0,0,0,0};
     json_error_t error;
     json_t *c_array = json_object_get(data, "c");
     json_t *p_value = json_object_get(data, "p");
@@ -329,11 +392,12 @@ void save_string(json_t* data){
           fprintf(file[i],"p:%f\ts:%s\tt:%lld\tv:%lld\n",p,json_string_value(s_value),t,v);
           if(p > maxp[i]) maxp[i] = p;
           if(minp[i] > p) minp[i] = p;
-          sum_v[i] += v;
           if(!flag_init[i]){
             flag_init[i] = true;
             start_price[i] = p;
           }
+          price[i]=p;
+          volume_sum[i] += v;
         }
     }
 }  
@@ -343,21 +407,23 @@ void *counter(){
   //open files and stuff
   while(1){
     printf("Sleeping for 1 second...\n");
-    usleep(60000000);  // Sleep for 1,000,000 microseconds (1 second)
+    usleep(60000000);  // Sleep for 1 min
     printf("Awoke from sleep.\n");
     pthread_mutex_lock(&cntr_mut);
     //open files n shit
     for(int i = 0; i < REQUEST_SIZE; i++){
-      if(maxp[i]!= 0 && minp[i] - MAXFLOAT < 0.1){
-        printf("s=%s\tmax = %f\tmin = %f\tv=%lld\tinit_price=%f\n",symbols[i],maxp[i],minp[i],sum_v[i],start_price[i]);
+      if(maxp[i]!= 0 && MAXFLOAT - minp[i] > 0.1){
+        printf("s=%s\tmax = %f\tmin = %f\tv=%lld\tinit_price=%f\t final_price = %f\n",symbols[i],maxp[i],minp[i],volume_sum[i],start_price[i],price[i]);
+        queue2Add(volumes,i,volume_sum[i]);
+        printf("volume in 15 mins: %lld\n",queue2Get(volumes,i));
       }else{
         printf("no data for %s this min\n",symbols[i]);
       }
       maxp[i] = 0;
       minp[i] = MAXFLOAT;
-      sum_v[i] = 0;
       flag_init[i] = false;
       start_price[i] = 0;
+      volume_sum[i] = 0;
     }
     
     //reset max and min float values for the next second

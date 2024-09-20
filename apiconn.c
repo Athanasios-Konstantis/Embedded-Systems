@@ -8,8 +8,9 @@
 #include <sys/stat.h>
 #include <time.h>
 #include <stdbool.h>
-#define QUEUESIZE 1000
-#define LOOP 20
+#include <signal.h>
+#include <stdlib.h>
+#define QUEUESIZE 500
 #define REQUEST_SIZE 4
 #define MAXFLOAT 0x1.fffffep+127f
 
@@ -24,14 +25,15 @@ static int interrupted_intentionally = 0;
 static int times_pinged = 0;
 static struct lws *client_wsi = NULL;
 
-//max and min price this second
-float price[4] = {0,0,0,0};
-float maxp[4] = {0,0,0,0};
-long long volume_sum[4] = {0,0,0,0};
-float minp[4] = {MAXFLOAT,MAXFLOAT,MAXFLOAT,MAXFLOAT};
-bool flag_init[4] = {false,false,false,false};
-float start_price[4] = {0,0,0,0};
 const char* symbols[] = {"AAPL","AMZN","MSFT","BTC"};
+//max and min price this second
+int minute_prices[REQUEST_SIZE][50] = {0};
+float price[REQUEST_SIZE] = {0};
+float maxp[REQUEST_SIZE] = {0};
+long long volume_sum[REQUEST_SIZE] = {0};
+float minp[REQUEST_SIZE] = {MAXFLOAT};
+bool flag_init[REQUEST_SIZE] = {false};
+float start_price[REQUEST_SIZE] = {0};
 void save_string(json_t* data);
 void *producer();
 void *consumer();
@@ -125,16 +127,27 @@ static int ws_callback(struct lws *wsi, enum lws_callback_reasons reason,
                     exit(EXIT_FAILURE);
                   }//dont forget to json_decref them in the end i guess
                   if(!fifo->full){
-                    queueAdd(fifo, data);    
+                    pthread_mutex_lock (fifo->mut);
+                    queueAdd(fifo, data);
+                    pthread_mutex_unlock (fifo->mut);
+                    pthread_cond_signal (fifo->notEmpty);
                     printf("ADDED ITEM TO QUEUE\n");
                   }else{
-                    printf("LOST DATA\n");
-                    //exit(0);
+                    while (fifo->full) {
+                      printf ("producer: queue FULL.\n");
+                      pthread_cond_wait (fifo->notFull, fifo->mut);
+                    }
+                    pthread_mutex_lock (fifo->mut);
+                    queueAdd(fifo, data);
+                    pthread_mutex_unlock (fifo->mut);
+                    pthread_cond_signal (fifo->notEmpty);
+                    printf("ADDED ITEM TO QUEUE\n");
                   }
               }
             }else{fprintf(stderr,"len less than or equal to 0\n");}
             break;
         case LWS_CALLBACK_CLIENT_CONNECTION_ERROR:
+            interrupted = 1;
             printf("Connection error\n");
             break;
         case LWS_CALLBACK_CLIENT_CLOSED:
@@ -232,14 +245,7 @@ void *producer()
         interrupted = 0;
     }
     if(!interrupted_intentionally){
-      pthread_mutex_lock (fifo->mut);
-      while (fifo->full) {
-        printf ("producer: queue FULL.\n");
-        pthread_cond_wait (fifo->notFull, fifo->mut);
-      }
       lws_service(context, 1000);
-      pthread_mutex_unlock (fifo->mut);
-      pthread_cond_signal (fifo->notEmpty);
     }
 
     if (interrupted){
@@ -310,6 +316,7 @@ queue2 *queue2Init(void){
     }
     
   }
+  return q;
 }
 
 void queueDelete (queue *q)
@@ -371,7 +378,6 @@ long long queue2Get(queue2 *q, int index){
 
 
 void save_string(json_t* data){
-    static int price_index[4] = {0,0,0,0};
     json_error_t error;
     json_t *c_array = json_object_get(data, "c");
     json_t *p_value = json_object_get(data, "p");
@@ -411,6 +417,7 @@ void *counter(){
     printf("Awoke from sleep.\n");
     pthread_mutex_lock(&cntr_mut);
     //open files n shit
+    printf("reached part 1 of code");
     for(int i = 0; i < REQUEST_SIZE; i++){
       if(maxp[i]!= 0 && MAXFLOAT - minp[i] > 0.1){
         printf("s=%s\tmax = %f\tmin = %f\tv=%lld\tinit_price=%f\t final_price = %f\n",symbols[i],maxp[i],minp[i],volume_sum[i],start_price[i],price[i]);

@@ -27,13 +27,12 @@ pthread_mutex_t cntr_mut;
 //Variables relative to current time estimation
 time_t now;
 struct tm *t;
-char time_str[40];
 
 pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 pthread_cond_t cond = PTHREAD_COND_INITIALIZER;
 
 //Files storing the trades & candlesticks
-FILE *file[REQUEST_SIZE*2];
+FILE *file[REQUEST_SIZE*3];
 
 //Boolean values for interruption 
 static bool exit_requested = false;
@@ -44,7 +43,7 @@ static bool consumer_can_exit = false;
 static int times_pinged = 0;
 
 //Symbols requesting for data
-const char* symbols[REQUEST_SIZE] = {"BINANCE:ETHUSDT","AMZN","MSFT","BTC"}; //AAPL AMZN BINANCE:ETHUSDT COINBASE:ETH-USD
+const char* symbols[REQUEST_SIZE] = {"BINANCE:ETHUSDT","AMZN","MSFT","AAPL"}; //AAPL AMZN BINANCE:ETHUSDT COINBASE:ETH-USD
 
 
 
@@ -53,7 +52,7 @@ double minute_prices[REQUEST_SIZE] = {0};
 static int number_of_trades[REQUEST_SIZE] = {0};
 float price[REQUEST_SIZE] = {0};
 float maxp[REQUEST_SIZE] = {0};
-long long volume_sum[REQUEST_SIZE] = {0};
+float volume_sum[REQUEST_SIZE] = {0};
 float minp[REQUEST_SIZE] = {MAXFLOAT};
 bool flag_init[REQUEST_SIZE] = {false};
 float start_price[REQUEST_SIZE] = {0};
@@ -73,9 +72,10 @@ static struct lws_context *create_context(void);
 //info after parsing
 typedef struct{
   long long int t;
-  long long int v;
+  float v;
   float p;
-  const char* s;
+  char s[40];
+  time_t time_received;
 } input_info;
 
 //Queue for producer-consumer
@@ -169,27 +169,34 @@ static struct lws_protocols protocols[] = {
 
 int main() {
   //make all threads
-	pthread_t pro,con1,con2,con3,cntr;
+	pthread_t pro,con,cntr;
   
-  //get current time
-  now = time(NULL);
-  t = localtime(&now);
-  strftime(time_str, sizeof(time_str), "%Y%m%d_%H%M%S.json", t);
   
   //open all files
-  for(int i = 0; i < REQUEST_SIZE*2; i++)
+  for(int i = 0; i < REQUEST_SIZE*3; i++)
   {
-    char filename[20];
-    if(i < REQUEST_SIZE)
+    char filename[40];
+    char first_line[60];
+    if(i < REQUEST_SIZE){
       sprintf(filename,"%s.txt",symbols[i]);
-    else
+      sprintf(first_line,"price\t\tserver time\tvolume\t\ttime received\ttime consumed\n");
+    }
+    else if (i < 2*REQUEST_SIZE){
       sprintf(filename,"%s_c.txt",symbols[i-REQUEST_SIZE]);
+      sprintf(first_line,"max\t\tmin\t\tv\t\tinit_price\tfinal_price\n");
+    }
+    else{
+      sprintf(filename, "%s_d.txt",symbols[i-2*REQUEST_SIZE]);
+      sprintf(first_line,"volume\t\tmean\n");
+    }
     file[i] = fopen(filename,"w");
     if(file[i] == NULL)
     {
       printf("Error opening file\n");
       return -1;
     }
+    //write the stuff
+    fprintf(file[i],"%s",first_line);
   }
   
   //initialize cntr mutex
@@ -210,12 +217,12 @@ int main() {
   
   //Create all threads
   pthread_create(&pro, NULL, producer, NULL);
-	pthread_create(&con1, NULL, consumer, NULL);
-  //pthread_create(&con2, NULL, consumer, NULL);
+	pthread_create(&con, NULL, consumer, NULL);
+  //pthread_create(&con2, NULL, consumer, NULL);  
   //pthread_create(&con3, NULL, consumer, NULL);
   pthread_create(&cntr, NULL, counter, NULL);
 	pthread_join(pro,NULL);
-	pthread_join(con1,NULL);
+	pthread_join(con,NULL);
   //pthread_join(con2,NULL);
   //pthread_join(con3,NULL);
   pthread_join(cntr,NULL);
@@ -390,7 +397,7 @@ void queueDel (queue *q, input_info* out)
 
   return;
 }
-long long queue2Get(queue2 *q, int index){
+float queue2Get(queue2 *q, int index){
   long long sum = 0;
   for(int i = 0; i < 15; i++){
     sum += q->buff[index][i];
@@ -405,7 +412,8 @@ void save_string(input_info data){
     {
         if(strcmp(data.s,symbols[i]) == 0)
         {
-          fprintf(file[i],"p:%f\ts:%s\tt:%lld\tv:%lld\n",data.p,data.s,data.t,data.v);
+          fprintf(file[i],"%f\t%lld\t%f\t%ld\t%ld\n",data.p,data.t,data.v,data.time_received,time(NULL));
+          pthread_mutex_lock(&cntr_mut);
           if(data.p > maxp[i]) maxp[i] = data.p;
           if(minp[i] > data.p) minp[i] = data.p;
           if(!flag_init[i])
@@ -414,9 +422,10 @@ void save_string(input_info data){
             start_price[i] = data.p;
           }
           price[i]=data.p;
-          volume_sum[i] += data.v;
+          volume_sum[i] += (float) data.v;
           minute_prices[i] += data.p;
           number_of_trades[i]++;
+          pthread_mutex_unlock(&cntr_mut);
           //printf("i:%d INDEX:%d\n",i,number_of_trades[i]);
         }
     }
@@ -455,12 +464,14 @@ void *counter(){
       if(maxp[i]!= 0 && MAXFLOAT - minp[i] > 0.1 && number_of_trades[i] != 0)
       {
         double mean_minute_price = minute_prices[i]/number_of_trades[i];
-        fprintf(file[REQUEST_SIZE+i],"s=%s\tmax = %f\tmin = %f\tv=%lld\tinit_price=%f\t final_price = %f\n",symbols[i],maxp[i],minp[i],volume_sum[i],start_price[i],price[i]);
+        fprintf(file[REQUEST_SIZE+i],"%f\t%f\t%f\t%f\t%f\n",maxp[i],minp[i],volume_sum[i],start_price[i],price[i]);
         queue2Add(mean_prices,i,mean_minute_price);
         queue2Add(volumes,i,volume_sum[i]);
-        fprintf(file[REQUEST_SIZE+i],"volume in 15 mins: %lld, mean price in 15 mins: %f\n",queue2Get(volumes,i),queue2Get(mean_prices,i)/15);
+        fprintf(file[2*REQUEST_SIZE+i],"%f\t%f\n",queue2Get(volumes,i),queue2Get(mean_prices,i)/15);
       }else{
         printf("no data for %s this min\n",symbols[i]);
+        fprintf(file[REQUEST_SIZE+i],"null\n");
+        fprintf(file[2*REQUEST_SIZE+i],"null\n");
       }
       //reset max and min float values for the next min
       maxp[i] = 0;
@@ -515,6 +526,8 @@ void parse_message(char *in)
   json_t *whole_msg = json_loads((char *)in, 0, &error);
   if (!whole_msg) {
     fprintf(stderr, "Error getting JSON from server: %s\n", error.text);
+    json_decref(whole_msg);
+    return;
   }
   json_t *data_array = json_object_get(whole_msg, "data");
   if (!json_is_array(data_array)) {
@@ -523,6 +536,8 @@ void parse_message(char *in)
       if(!json_is_string(type)){
         printf("type is not an array \n");
         fprintf(stderr, "\"data\" is not an array or does not exist.\n");
+        json_decref(type);
+        json_decref(data_array);
         json_decref(whole_msg);
         return ;
       } 
@@ -532,6 +547,9 @@ void parse_message(char *in)
           times_pinged = 0;
         }
       printf("TIMES PINGED = %d\n",times_pinged);
+      json_decref(type);
+      json_decref(data_array);
+      json_decref(whole_msg);
       return ;
       }
   }    
@@ -543,7 +561,6 @@ void parse_message(char *in)
       {
         fprintf(stderr, "Error: Data %d is not an object\n", i);
         lws_context_destroy(context);
-        json_decref(data);//see this line again
         exit(EXIT_FAILURE);
       }//dont forget to json_decref them in the end i guess
       json_t *c_array = json_object_get(data, "c");
@@ -557,7 +574,32 @@ void parse_message(char *in)
         fprintf(stderr, "Error: One or more JSON values are NULL.\n");
         return;  // or handle the error appropriately
       }
-      input_info curr_info = {.t = json_integer_value(t_value), .v = json_integer_value(v_value), .p = json_real_value(p_value), .s = json_string_value(s_value)};
+      input_info curr_info;
+      curr_info.t = json_integer_value(t_value);
+      if(json_integer_value(p_value)){
+        curr_info.p = (float) json_integer_value(p_value);
+      }else if(json_real_value(p_value)){
+        curr_info.p = json_real_value(p_value);
+      }else{
+          printf("error");//see this code again
+      }
+      if(json_integer_value(v_value)){
+        curr_info.v = (float) json_integer_value(v_value);
+      }else if(json_real_value(v_value)){
+        curr_info.v = json_real_value(v_value);
+      }else{
+        printf("error");//see this code again
+      }
+      curr_info.time_received = time(NULL);
+      sprintf(curr_info.s,"%s",json_string_value(s_value));
+
+      //free the json_t objects
+      json_decref(c_array);
+      json_decref(p_value);
+      json_decref(s_value);
+      json_decref(t_value);
+      json_decref(v_value);
+
       if(!fifo->full){
         pthread_mutex_lock (fifo->mut);
         queueAdd(fifo, curr_info);

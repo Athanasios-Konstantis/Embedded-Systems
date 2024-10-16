@@ -65,6 +65,8 @@ void *producer();
 void *consumer();
 void *counter();
 
+
+
 //Functions related to client connection
 static struct lws *connect_to_server(struct lws_context *context);
 static struct lws_context *create_context(void);
@@ -75,7 +77,7 @@ typedef struct{
   float v;
   float p;
   char s[40];
-  time_t time_received;
+  unsigned long long time_received;
 } input_info;
 
 //Queue for producer-consumer
@@ -117,6 +119,11 @@ static void sigint_handler(int sig);
 
 void parse_message(char* in);
 
+unsigned long long int gettimenow(){
+  struct timeval tv;
+  gettimeofday(&tv,NULL);
+  return (unsigned long long int)(tv.tv_sec) *1000 + (unsigned long long int)(tv.tv_usec)/1000;
+}
 //Function is called every time the server sends a message
 static int ws_callback(struct lws *wsi, enum lws_callback_reasons reason, void *user, void *in, size_t len) {
     switch (reason) {
@@ -138,7 +145,7 @@ static int ws_callback(struct lws *wsi, enum lws_callback_reasons reason, void *
             }
             break;
         case LWS_CALLBACK_CLIENT_RECEIVE: //Recieved a message response
-            printf("Received message: %s\n \t\t\t\t\t\t\t\t @ time %ld\n", (char *)in,time(NULL));
+            printf("Received message: %s\n \t\t\t\t\t\t\t\t @ time %lld\n", (char *)in,gettimenow());
             if(len > 0)
               parse_message((char *) in);
             else
@@ -290,19 +297,22 @@ void *producer()
 void *consumer()
 {
   input_info msg;
+  printf("SPAWNED CONSUMER\n");
   while(1)
   {
     pthread_mutex_lock(fifo->mut);
     while (fifo->empty && !consumer_can_exit) {
+      printf("CONSUMER SLEEPS UNTIL FIFO NOT EMPTY ZZZZZZZZZZZ");
       //printf("consumer: queue EMPTY.\n");
       pthread_cond_wait(fifo->notEmpty,fifo->mut);
     }
+    printf("CONSUMER WOKE UP!!!");
     if(consumer_can_exit && fifo->empty){
         printf("\nexiting consumer\n");
         return NULL;
       }
 
-    
+    printf("CONSUMER DELETING MESSAGE\n");
     queueDel(fifo, &msg);
     printf("CONSUMER DELETED ITEM FROM QUEUE\n");
     
@@ -412,8 +422,7 @@ void save_string(input_info data){
     {
         if(strcmp(data.s,symbols[i]) == 0)
         {
-          fprintf(file[i],"%f\t%lld\t%f\t%ld\t%ld\n",data.p,data.t,data.v,data.time_received,time(NULL));
-          pthread_mutex_lock(&cntr_mut);
+          fprintf(file[i],"%f\t%lld\t%f\t%lld\t%lld\n",data.p,data.t,data.v,data.time_received,gettimenow());
           if(data.p > maxp[i]) maxp[i] = data.p;
           if(minp[i] > data.p) minp[i] = data.p;
           if(!flag_init[i])
@@ -425,7 +434,6 @@ void save_string(input_info data){
           volume_sum[i] += (float) data.v;
           minute_prices[i] += data.p;
           number_of_trades[i]++;
-          pthread_mutex_unlock(&cntr_mut);
           //printf("i:%d INDEX:%d\n",i,number_of_trades[i]);
         }
     }
@@ -590,7 +598,7 @@ void parse_message(char *in)
       }else{
         printf("error");//see this code again
       }
-      curr_info.time_received = time(NULL);
+      curr_info.time_received = gettimenow();
       sprintf(curr_info.s,"%s",json_string_value(s_value));
 
       //free the json_t objects
@@ -622,3 +630,4 @@ void parse_message(char *in)
   json_decref(data_array);
   return;
 }
+
